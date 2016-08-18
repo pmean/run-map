@@ -1,0 +1,30 @@
+---
+title: "Run maps"
+author: "Steve Simon"
+date: "August 18, 2016"
+output: html_document
+---
+
+First, let's clean house.
+
+```{r setup, include=FALSE}
+rm(list=ls())
+```
+
+Now get a directory of all the GPS files
+
+```{r get-filenames}
+path_list <- c("../r01", "../r02", "../r03", "../r04")
+all_file_names <- NULL
+all_run_numbers <- NULL
+for (i in 1:length(path_list)) {
+  file_names <- list.files(path=path_list[i], pattern="*.gpx")
+  run_numbers <- i*1000 + as.numeric(substr(file_names, 7, 9))
+  all_file_names <- c(all_file_names, file_names)
+  all_run_numbers <- c(all_run_numbers, run_numbers)
+}
+all_file_names
+all_run_numbers
+```
+
+By default, open the last file.
