@@ -9,22 +9,283 @@ First, let's clean house.
 
 ```{r setup, include=FALSE}
 rm(list=ls())
+library("dplyr")
+library("magrittr")
+library("RgoogleMaps")
+library("tibble")
 ```
 
 Now get a directory of all the GPS files
 
 ```{r get-filenames}
-path_list <- c("../r01", "../r02", "../r03", "../r04")
-all_file_names <- NULL
-all_run_numbers <- NULL
-for (i in 1:length(path_list)) {
-  file_names <- list.files(path=path_list[i], pattern="*.gpx")
-  run_numbers <- i*1000 + as.numeric(substr(file_names, 7, 9))
-  all_file_names <- c(all_file_names, file_names)
-  all_run_numbers <- c(all_run_numbers, run_numbers)
+search_for_files <- function(ext) {
+  path_list <- c("../r01/", "../r02/", "../r03/", "../r04/")
+  all_names <- NULL
+  for (i in 1:length(path_list)) {
+    ext_names <- list.files(path=path_list[i], pattern=paste("*", ext, sep="."))
+    cat(paste("\n\nFound", length(ext_names), "files of type", ext, "in", path_list[i]))
+    if (length(ext_names)>0) all_names <- c(paste(path_list[i], ext_names, sep=""), all_names)
+  }
+  n <- nchar(all_names)
+  all_names <- sub(paste(".", ext, sep=""), "", all_names)
+  return(all_names)
 }
-all_file_names
-all_run_numbers
+search_for_updates <- function(ext1, ext2) {
+  all_ext1 <- search_for_files(ext1)
+  all_ext2 <- search_for_files(ext2)
+  setdiff(all_ext1, all_ext2)
+}
 ```
 
-By default, open the last file.
+```{r parsing-functions}
+find_string <- function(x, s) {
+  grep(s, x, value=TRUE)
+}
+
+strip_text <- function(x, s) {
+  gsub(s, "", x, fixed=TRUE)
+}
+
+strip_regex <- function(x, s) {
+  gsub(s, "", x, fixed=FALSE)
+}
+```
+
+```{r open-last-file}
+create_csv <- function(f) {
+  raw_gpx_data <- readLines(paste(f, "gpx", sep="."))
+
+  raw_gpx_data %>%
+    find_string("<ele>") %>%
+    strip_text("<ele>")  %>%
+    strip_text("</ele>") %>%
+    as.numeric            ->  gpx_ele
+
+  # <trkpt lat="38.8582928" lon="-94.6326901">
+
+  raw_gpx_data                 %>%
+    find_string("lat=")        %>% # select strings with lat=
+    strip_regex('" lon=.+')    %>% # remove '" lon=' to end
+    strip_regex('.+lat="')     %>% # remove beginning to 'lat="'
+    as.numeric                  -> gpx_lat 
+
+  raw_gpx_data %>%
+    find_string("lon=")    %>% # select strings with lon=
+    strip_regex('.+lon="') %>% # remove beginning to 'lon="'
+    strip_text('">')       %>% # remove '">'
+    as.numeric -> gpx_lon 
+
+  # <time>2016-07-24T12:01:34.936Z</time>
+
+  raw_gpx_data %>%
+    find_string("<time>") %>%          # select strings with <time>
+    strip_regex("T.+")    %>%          # remove from "T" to end
+    strip_text("<time>")  -> gpx_date  # remove <time>
+
+  raw_gpx_data                 %>%
+    find_string("<time>")      %>% # select strings with <time>
+    strip_regex(".+T")         %>% # remove from beginning to "T"
+    strip_text("Z</time>")     %>% # remove Z</time>
+    strsplit(":")              %>% # split into hours, minutes, seconds
+    unlist                     %>% # convert from list to vector
+    as.numeric                 %>% # convert from stings to numbers
+    matrix(ncol=3, byrow=TRUE) %>% # convert from vector to matrix
+    as_tibble                   -> gpx_time # convert to tibble and store
+
+  gpx_seconds <- unlist(gpx_time[, 1]*3600 + gpx_time[, 2]*60 + gpx_time[, 3])
+  gpx_seconds <- round(gpx_seconds - gpx_seconds[1])
+
+  meters_in_radius <- 6371*1000 
+  meters_in_circumference <- 2*pi*meters_in_radius
+  meters_per_degree_latitude <- meters_in_circumference / 360
+  meters_per_degree_longitude <- meters_per_degree_latitude * cos(gpx_lat[1]*pi/180)
+
+  tibble(lat=gpx_lat, lon=gpx_lon, ele=gpx_ele, tim=gpx_seconds) %>%
+    mutate(sm_lat=runmed(lat, 11, endrule="median"))             %>%
+    mutate(sm_lon=runmed(lon, 11, endrule="median"))             %>%
+    mutate(kmx=sm_lon*meters_per_degree_longitude)               %>%
+    mutate(kmy=sm_lat*meters_per_degree_latitude)                %>%
+    mutate(kmx=kmx-lag(kmx, default=kmx[1]))                     %>%
+    mutate(kmy=kmy-lag(kmy, default=kmy[1]))                     %>%
+    mutate(dst=sqrt(kmx^2+kmy^2))                                %>%
+    mutate(dst=round(cumsum(dst)))                               %>%
+    select(lat, lon, sm_lat, sm_lon, ele, tim, dst)           -> gpx
+
+  write.csv(gpx, file=paste(f, "csv", sep="."))
+}
+```
+
+```{r update-only-new-files, eval=TRUE, echo=TRUE}
+update_list <- search_for_updates("gpx", "csv")
+print(length(update_list))
+for (f in update_list) {create_csv(f)}
+```
+
+Optionally, you can update all the csv files. Do this when you change the format.
+
+```{r update-everything, eval=FALSE, echo=FALSE}
+# general file format ../r0n/Track nnn.ext
+gpx_list <- search_for_files("gpx")
+print(length(gpx_list))
+for (f in gpx_list) {create_csv(f)}
+```
+
+```{r get-zoom}
+get_zoom <- function(f) {
+  gpx <- read.csv(paste(f, "csv", sep="."))
+  rlat <- range(gpx$lat)
+  rlon <- range(gpx$lon)
+  cen <- c(mean(rlat), mean(rlon))
+  zm <- MaxZoom(rlat, rlon, size=c(640, 640))
+  tibble(file_name=f, cen_x=cen[1], cen_y=cen[2], zoom=zm)
+}
+```
+
+```{r get-all-zooms, eval=FALSE}
+csv_list <- search_for_files("csv")
+print(length(csv_list))
+map_information <- get_zoom(csv_list[1])
+for (f in csv_list[-1]) {
+  map_information <- rbind(map_information, get_zoom(f))
+}
+write.csv(map_information, file="map_information.csv")
+```
+
+```{r get-raster, eval=FALSE}
+library("RgoogleMaps")
+create_raster <- function(f) {
+  gpx <- read.csv(paste(f, "csv", sep="."))
+  rlat <- range(gpx$lat)
+  rlon <- range(gpx$lon)
+  cen <- c(mean(rlat), mean(rlon))
+  zm <- MaxZoom(rlat, rlon, size=c(640, 640))
+  map_goo <- GetMap(destfile="mapj.png",center=cen, zoom=zm ,maptype="hybrid")
+  save(map_goo, file=paste(f, "RData", sep="."))
+}
+update_list <- search_for_updates("csv", "RData")
+print(length(update_list))
+for (f in update_list[1:50]) {
+  create_raster(f)
+}
+```
+
+```{r translate-gpx-to-pix}
+translate_to_pixels <- function(f, sm=0) {
+  gpx <- read.csv(paste(f, "csv", sep="."))
+  map_information <- read.csv(file="map_information.csv")
+  goo <- filter(map_information, file_name==f)
+  lat <- gpx$lat
+  lon <- gpx$lon
+  if (sm>0) {
+    lat <- runmed(lat, sm, endrule="median")
+    lon <- runmed(lon, sm, endrule="median")
+  }
+  pos_mp <- LatLon2XY(lat, lon, goo$zoom)
+  cen_mp <- LatLon2XY(goo$cen_x, goo$cen_y, goo$zoom)
+  pix <- Tile2R(pos_mp, cen_mp)
+  names(pix) <- tolower(names(pix))
+  meters_in_radius <- 6371*1000 
+  meters_in_circumference <- 2*pi*meters_in_radius
+  meters_per_degree_latitude <- meters_in_circumference / 360
+  meters_per_degree_longitude <- meters_per_degree_latitude * cos(lat[1]*pi/180)
+  dx <- (lat - lag(lat, default=lat[1])) * meters_per_degree_latitude
+  dy <- (lon - lag(lon, default=lon[1])) * meters_per_degree_longitude
+  dst <- cumsum(sqrt(dx^2+dy^2))
+  ang <- -atan2(-dy, dx)*180/pi # found by trial and error
+  rte <- tibble(lat, lon, x=round(pix$x), y=round(pix$y), dst=round(dst), tim=round(gpx$tim), ang=ang)
+  print(rte)
+  return(rte)
+}
+
+```
+
+```{r circle function, fig.width=5, fig.height=5}
+map_polygon <- function(x_center, y_center, radius, angle_degrees, lb, sides=3) {
+  angle_radians <- 2*pi*(angle_degrees-90)/360
+  radian_sequence <- angle_radians + seq(-pi, pi, length=sides+1)
+  polygon(x_center+radius*cos(radian_sequence), y_center+radius*sin(radian_sequence), density=-1, col="blue", border="blue")
+  cx <- ifelse(nchar(lb)==1,1,0.75)
+  text(x_center, y_center, lb, cex=cx, col="white", srt=angle_degrees)
+}
+
+par(mar=c(4.6, 4.6, 0.6, 0.6))
+x0 <- c( 200,  200, 160, 120,   80,  25)
+y0 <- c(  25,   80, 120, 160,  200, 200)
+x <- c(x0,-rev(x0), -x0, rev(x0))
+y <- c(y0, rev(y0), -y0,-rev(y0))
+plot(x, y, type="n", xlim=c(-320, 320), ylim=c(-320, 320), xlab=" ", ylab=" ")
+text(x, y, 1:length(x))
+library("dplyr")
+dx <- x-lag(x, default=x[1])
+dy <- y-lag(y, default=y[1])
+an <- -atan2(dx, dy) * 360/(2*pi)
+plot(x, y, type="n", xlim=c(-320, 320), ylim=c(-320, 320), xlab=" ", ylab=" ")
+for (i in 2:length(x)) {
+  map_polygon(x[i], y[i], 20, an[i], an[i])
+}
+```
+
+```{r sample-pix, fig.width=7, fig.height=7}
+rdata_list <- search_for_files("RData")
+for (f in sample(rdata_list, size=20)) {
+  load(file=paste(f, "RData", sep="."))
+  rt1 <- translate_to_pixels(f)
+  rt2 <- translate_to_pixels(f, sm=9)
+  print(f)
+  print(max(rt1$dst))
+  print(max(rt2$dst))
+  par(mar=rep(0,4),xaxs="i",yaxs="i")
+  plot(c(-320, 320),c(-320, 320), type="n", axes=FALSE)
+  rasterImage(map_goo$myTile, -320, -320, 320, 320)
+  lines(rt1$x, rt1$y, lwd=5, col="blue")
+  # lines(rt2$x, rt2$y, lwd=3, col="red")
+  markers <- c(seq(0, max(rt1$dst), by=500), max(rt1$dst))
+  for (m in markers) {
+    i <- sum(rt1$dst <= m)
+    map_polygon(rt1$x[i], rt1$y[i], 20, rt1$ang[i], round(m/1000, 1))
+  }
+}
+```
+
+```{r more_functions, eval=FALSE}
+cal.mrk <- function(ilog=chk$ilog) {
+  # uses get.pix, map.dvc
+  if (verbose) cat("v1.1.1 cal.mrk\n")
+  pix.dat <- get.pix(ilog)
+  dmrk <- map.dvc(pix.dat[,"cdst"])
+  mrk.dat <- matrix(0,nrow=length(dmrk),ncol=6)
+  dimnames(mrk.dat)[[2]] <- c("x","y","cdst","tm","pang","speed")
+  for (i in 1:length(dmrk)) {
+    mrk.dat[i,   "x"] <- round(cal.ing(pix.dat,"cdst",dmrk[i],"x"))
+    mrk.dat[i,   "y"] <- round(cal.ing(pix.dat,"cdst",dmrk[i],"y"))
+    mrk.dat[i,  "tm"] <- round(cal.ing(pix.dat,"cdst",dmrk[i],"tim"))
+    mrk.dat[i,"pang"] <- round(cal.ing(pix.dat,"cdst",dmrk[i],"pang"))
+  }
+  mrk.dat[,"cdst"] <- round(dmrk/1000,2)
+  mrk.dat[-1,"speed"] <- round(3600*diff(c(mrk.dat[,"cdst"]))/diff(c(mrk.dat[,"tm"])),1)
+  return(mrk.dat)
+}
+
+# map.sqr(cm[1,"x"],cm[1,"y"],8,"blue")
+# text(cm[1,"x"],cm[1,"y"],"0",col="white")
+# for (i in 2:(n-1)) {
+#   map.cir(cm[i,"x"],cm[i,"y"],cm[i,"pang"],8,cm[i,"cdst"])
+# }
+# map.dia(cm[n,"x"],cm[n,"y"],8,"blue")
+# text(cm[n,"x"],cm[n,"y"],cm[n,"cdst"],col="white")
+
+```
+
+
+```{r show-raster, fig.width=7, fig.height=7, eval=FALSE}
+par(mar=rep(0,4),xaxs="i",yaxs="i")
+plot(c(-320, 320),c(-320, 320), type="n", axes=FALSE)
+rasterImage(map_ras, -320, -320, 320, 320)
+lines(pos_dat, lwd=5, col="blue")
+```
+
+Save everything
+
+```{r save-everything}
+save.image("draw_map.RData")
+```

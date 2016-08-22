@@ -1,6 +1,7 @@
 # run-map
 
 This is a single file stand-alone application using R Markdown.
+You need the dplyr, magrittr, tibble libraries
 
 It was run and tested using RStudio and the knitr package.
 
