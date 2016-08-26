@@ -191,7 +191,8 @@ translate_to_pixels <- function(f, sm=0) {
   dx <- (lat - lag(lat, default=lat[1])) * meters_per_degree_latitude
   dy <- (lon - lag(lon, default=lon[1])) * meters_per_degree_longitude
   dst <- cumsum(sqrt(dx^2+dy^2))
-  ang <- -atan2(-dy, dx)*180/pi # found by trial and error
+  ang <- 90 + atan2(-dy, dx)*180/pi # found by trial and error
+  ang <- runmed(ang, 9, endrule="median")
   rte <- tibble(lat, lon, x=round(pix$x), y=round(pix$y), dst=round(dst), tim=round(gpx$tim), ang=ang)
   print(rte)
   return(rte)
@@ -201,16 +202,16 @@ translate_to_pixels <- function(f, sm=0) {
 
 ```{r circle function, fig.width=5, fig.height=5}
 map_polygon <- function(x_center, y_center, radius, angle_degrees, lb, sides=3) {
-  angle_radians <- 2*pi*(angle_degrees-90)/360
-  radian_sequence <- angle_radians + seq(-pi, pi, length=sides+1)
+  angle_radians <- pi*angle_degrees / 180
+  radian_sequence <- angle_radians + seq(0, 2*pi, length=sides+1)
   polygon(x_center+radius*cos(radian_sequence), y_center+radius*sin(radian_sequence), density=-1, col="blue", border="blue")
   cx <- ifelse(nchar(lb)==1,1,0.75)
-  text(x_center, y_center, lb, cex=cx, col="white", srt=angle_degrees)
+  text(x_center, y_center, lb, cex=cx, col="white", srt=angle_degrees-90)
 }
 
 par(mar=c(4.6, 4.6, 0.6, 0.6))
-x0 <- c( 200,  200, 160, 120,   80,  25)
-y0 <- c(  25,   80, 120, 160,  200, 200)
+x0 <- c( 300, 300, 240, 180,  120,  40)
+y0 <- c(  40, 120, 180, 240,  300, 300)
 x <- c(x0,-rev(x0), -x0, rev(x0))
 y <- c(y0, rev(y0), -y0,-rev(y0))
 plot(x, y, type="n", xlim=c(-320, 320), ylim=c(-320, 320), xlab=" ", ylab=" ")
@@ -218,16 +219,16 @@ text(x, y, 1:length(x))
 library("dplyr")
 dx <- x-lag(x, default=x[1])
 dy <- y-lag(y, default=y[1])
-an <- -atan2(dx, dy) * 360/(2*pi)
+an <- atan2(dy, dx) * 180 / pi
 plot(x, y, type="n", xlim=c(-320, 320), ylim=c(-320, 320), xlab=" ", ylab=" ")
 for (i in 2:length(x)) {
-  map_polygon(x[i], y[i], 20, an[i], an[i])
+  map_polygon(x[i], y[i], 30, an[i], an[i])
 }
 ```
 
 ```{r sample-pix, fig.width=7, fig.height=7}
 rdata_list <- search_for_files("RData")
-for (f in sample(rdata_list, size=20)) {
+for (f in rdata_list[1:20]) {
   load(file=paste(f, "RData", sep="."))
   rt1 <- translate_to_pixels(f)
   rt2 <- translate_to_pixels(f, sm=9)
